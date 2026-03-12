@@ -12,21 +12,7 @@ MergeClaw is an open-source autonomous AI GitHub maintainer. It:
 
 ---
 
-## Quick Start
 
-```bash
-# Fork and clone
-git clone https://github.com/YOUR_USERNAME/MergeClaw.git
-cd MergeClaw
-
-# Install dependencies
-npm install
-
-# Run tests
-npm test
-```
-
----
 
 ## Code Conventions
 
