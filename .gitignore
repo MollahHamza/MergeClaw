@@ -1,0 +1,5 @@
+server/repo-orca.*.private-key.pem
+.env
+node_modules/
+.DS_Store
+*.pem
