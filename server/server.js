@@ -1,11 +1,35 @@
-const { App } = require("octokit");
-const fs = require("fs");
-const express = require("express");
-const { createNodeMiddleware } = require("@octokit/webhooks");
-const { createReactAgent } = require("@langchain/langgraph/prebuilt");
-const { DynamicTool } = require("@langchain/core/tools");
-const { ChatGoogleGenerativeAI } = require("@langchain/google-genai");
-require("dotenv").config();
+import { App } from "@octokit/app";
+import fs from "fs";
+import express from "express";
+import { createNodeMiddleware } from "@octokit/webhooks";
+import { createReactAgent } from "@langchain/langgraph/prebuilt";
+import { DynamicTool } from "@langchain/core/tools";
+import { ChatGoogleGenerativeAI } from "@langchain/google-genai";
+import dotenv from "dotenv";
+dotenv.config();
+
+// --- Telegram Approval Setup ---
+const TELEGRAM_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
+const pendingActions = new Map(); // id -> { tool, args, token }
+
+const genId = () => Math.random().toString(36).slice(2, 8);
+
+async function sendTelegram(text) {
+  if (!TELEGRAM_TOKEN || !TELEGRAM_CHAT_ID) {
+    console.warn("[Telegram] Missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID in .env");
+    return;
+  }
+  try {
+    await fetch(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ chat_id: TELEGRAM_CHAT_ID, text }),
+    });
+  } catch (err) {
+    console.error("[Telegram Error]", err.message);
+  }
+}
 
 // Fixed App Identity
 const app = new App({
@@ -96,7 +120,17 @@ const tools = [
   new DynamicTool({
     name: "comment_on_issue",
     description: "Comment on an issue. Args: { repo: string, issue_number: number, comment: string }",
-    func: async (input, config) => await callMCP("comment_on_issue", unwrap(input), resolveGithubToken(config)),
+    func: async (input, config) => {
+      const args = unwrap(input);
+      const token = resolveGithubToken(config);
+      const id = genId();
+      pendingActions.set(id, { tool: "comment_on_issue", args, token });
+      await sendTelegram(
+        `🤖 Bot wants to comment on Issue #${args.issue_number} in ${args.repo}:\n\n"${args.comment}"\n\nReply:\nAPPROVE ${id}\nREJECT ${id}`
+      );
+      console.log(`[Telegram] Comment queued for approval. ID: ${id}`);
+      return `Comment sent to Telegram for approval. ID: ${id}. Waiting for user to APPROVE or REJECT.`;
+    },
   }),
   new DynamicTool({
     name: "react_to_issue",
@@ -151,7 +185,17 @@ const tools = [
   new DynamicTool({
     name: "comment_on_pull_request",
     description: "Comment on a pull request. Args: { repo: string, pull_number: number, comment: string }",
-    func: async (input, config) => await callMCP("comment_on_pull_request", unwrap(input), resolveGithubToken(config)),
+    func: async (input, config) => {
+      const args = unwrap(input);
+      const token = resolveGithubToken(config);
+      const id = genId();
+      pendingActions.set(id, { tool: "comment_on_pull_request", args, token });
+      await sendTelegram(
+        `🤖 Bot wants to comment on PR #${args.pull_number} in ${args.repo}:\n\n"${args.comment}"\n\nReply:\nAPPROVE ${id}\nREJECT ${id}`
+      );
+      console.log(`[Telegram] PR comment queued for approval. ID: ${id}`);
+      return `Comment sent to Telegram for approval. ID: ${id}. Waiting for user to APPROVE or REJECT.`;
+    },
   }),
   new DynamicTool({
     name: "merge_pull_request",
@@ -324,6 +368,36 @@ app.webhooks.on("installation", async ({ payload }) => {
 
 app.webhooks.onError((error) => {
   console.error("[Webhook Error]", error.message || error);
+});
+
+// --- Telegram Webhook Endpoint ---
+// Receives APPROVE <id> or REJECT <id> from the Telegram bot
+server.post("/telegram", express.json(), async (req, res) => {
+  res.sendStatus(200); // Respond immediately so Telegram doesn't retry
+
+  const text = (req.body?.message?.text || "").trim();
+  const parts = text.split(" ");
+  const command = parts[0]?.toUpperCase();
+  const id = parts[1];
+
+  if (!id) return;
+
+  if (!pendingActions.has(id)) {
+    await sendTelegram(`⚠️ No pending action found for ID: ${id}`);
+    return;
+  }
+
+  const pending = pendingActions.get(id);
+  pendingActions.delete(id);
+
+  if (command === "APPROVE") {
+    console.log(`[Telegram] Action ${id} approved. Executing...`);
+    const result = await callMCP(pending.tool, pending.args, pending.token);
+    await sendTelegram(`✅ Done! Action ${id} executed.\n\n${result}`);
+  } else if (command === "REJECT") {
+    console.log(`[Telegram] Action ${id} rejected.`);
+    await sendTelegram(`❌ Action ${id} rejected and discarded.`);
+  }
 });
 
 server.listen(3000, () => console.log("Backend listening on port 3000"));
