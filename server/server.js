@@ -8,7 +8,6 @@ import { ChatGoogleGenerativeAI } from "@langchain/google-genai";
 import dotenv from "dotenv";
 dotenv.config();
 
-
 const TELEGRAM_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 const pendingActions = new Map();
@@ -115,7 +114,6 @@ const resolveGithubToken = (config) => {
 };
 
 // 2. Tool Definitions
-// Tools now pull the token from the LangGraph config
 const tools = [
   new DynamicTool({
     name: "comment_on_issue",
@@ -125,11 +123,8 @@ const tools = [
       const token = resolveGithubToken(config);
       const id = genId();
       pendingActions.set(id, { tool: "comment_on_issue", args, token });
-      await sendTelegram(
-        `🤖 Bot wants to comment on Issue #${args.issue_number} in ${args.repo}:\n\n"${args.comment}"\n\nReply:\nAPPROVE ${id}\nREJECT ${id}`
-      );
-      console.log(`[Telegram] Comment queued for approval. ID: ${id}`);
-      return `Comment sent to Telegram for approval. ID: ${id}. Waiting for user to APPROVE or REJECT.`;
+      await sendTelegram(`🤖 Bot wants to comment on Issue #${args.issue_number} in ${args.repo}:\n\n"${args.comment}"\n\nReply:\nAPPROVE ${id}\nREJECT ${id}`);
+      return `Comment sent to Telegram for approval. ID: ${id}. Waiting for user.`;
     },
   }),
   new DynamicTool({
@@ -174,7 +169,7 @@ const tools = [
   }),
   new DynamicTool({
     name: "get_installation_repositories",
-    description: "List repositories accessible to this installation token. Args: {}",
+    description: "List repositories accessible to this token. Args: {}",
     func: async (input, config) => await callMCP("get_installation_repositories", unwrap(input), resolveGithubToken(config)),
   }),
   new DynamicTool({
@@ -190,11 +185,8 @@ const tools = [
       const token = resolveGithubToken(config);
       const id = genId();
       pendingActions.set(id, { tool: "comment_on_pull_request", args, token });
-      await sendTelegram(
-        `🤖 Bot wants to comment on PR #${args.pull_number} in ${args.repo}:\n\n"${args.comment}"\n\nReply:\nAPPROVE ${id}\nREJECT ${id}`
-      );
-      console.log(`[Telegram] PR comment queued for approval. ID: ${id}`);
-      return `Comment sent to Telegram for approval. ID: ${id}. Waiting for user to APPROVE or REJECT.`;
+      await sendTelegram(`🤖 Bot wants to comment on PR #${args.pull_number} in ${args.repo}:\n\n"${args.comment}"\n\nReply:\nAPPROVE ${id}\nREJECT ${id}`);
+      return `Comment sent to Telegram for approval. ID: ${id}. Waiting for user.`;
     },
   }),
   new DynamicTool({
@@ -202,7 +194,6 @@ const tools = [
     description: "Merge a pull request. Args: { repo: string, pull_number: number, merge_method?: 'merge'|'squash'|'rebase' }",
     func: async (input, config) => await callMCP("merge_pull_request", unwrap(input), resolveGithubToken(config)),
   }),
-  // --- New Tools Added Below ---
   new DynamicTool({
     name: "get_pr_diff",
     description: "Get the raw text diff of a Pull Request to review code changes. Args: { repo: string, pull_number: number }",
@@ -223,13 +214,46 @@ const tools = [
     description: "Get the plaintext content of a specific file in the repository. Args: { repo: string, path: string }",
     func: async (input, config) => await callMCP("get_file_content", unwrap(input), resolveGithubToken(config)),
   }),
+  
+  // --- New Code Exploration & Review Tools Added Below ---
+  new DynamicTool({
+    name: "list_pr_files",
+    description: "Get a list of file paths changed in a Pull Request. Use this BEFORE reading the diff to understand the scope. Args: { repo: string, pull_number: number }",
+    func: async (input, config) => await callMCP("list_pr_files", unwrap(input), resolveGithubToken(config)),
+  }),
+  new DynamicTool({
+    name: "get_repo_tree",
+    description: "Get a list of all file paths in the repository. Useful to map the codebase. Args: { repo: string, branch?: string }",
+    func: async (input, config) => await callMCP("get_repo_tree", unwrap(input), resolveGithubToken(config)),
+  }),
+  new DynamicTool({
+    name: "search_repo_code",
+    description: "Search the codebase for specific keywords, function names, or variables. Returns matching file paths. Args: { repo: string, query: string }",
+    func: async (input, config) => await callMCP("search_repo_code", unwrap(input), resolveGithubToken(config)),
+  }),
+  new DynamicTool({
+    name: "create_pull_request_review",
+    description: "Submits an official PR Review. 'event' must be APPROVE, REQUEST_CHANGES, or COMMENT. Args: { repo: string, pull_number: number, event: string, body: string }",
+    func: async (input, config) => {
+      const args = unwrap(input);
+      const token = resolveGithubToken(config);
+      const id = genId();
+      pendingActions.set(id, { tool: "create_pull_request_review", args, token });
+      
+      // Send approval to Telegram
+      await sendTelegram(
+        `🤖 Bot wants to submit an OFFICIAL PR REVIEW [${args.event}] on PR #${args.pull_number} in ${args.repo}:\n\n"${args.body}"\n\nReply:\nAPPROVE ${id}\nREJECT ${id}`
+      );
+      console.log(`[Telegram] PR Review queued for approval. ID: ${id} | Event: ${args.event}`);
+      return `PR Review sent to Telegram for approval. ID: ${id}. Waiting for user to APPROVE or REJECT. Do not attempt to use this tool again for this turn.`;
+    },
+  }),
 ];
 
 const agent = createReactAgent({ llm: model, tools });
 
 /**
  * Handle Event
- * We generate a fresh token for the specific installation that triggered the webhook.
  */
 const handleEvent = async ({ input, installationId, eventName, action, repo, octokit }) => {
   console.log(`\n--- Starting Agent --- Event=${eventName} Action=${action || "n/a"} Repo=${repo}`);
@@ -244,13 +268,12 @@ const handleEvent = async ({ input, installationId, eventName, action, repo, oct
       return;
     }
 
-    // Mint a temporary token (valid for 1 hour) for this installation scope
     const { token } = await octokit.auth({ type: "installation" });
     runtimeGithubToken = token;
 
     const result = await agent.invoke(
       { messages: [{ role: "user", content: input }] },
-      { configurable: { token: token } } // Pass token to tools
+      { configurable: { token: token } }
     );
 
     console.log(`\nFinal Response: ${result.messages[result.messages.length - 1].content}`);
@@ -277,17 +300,10 @@ const processWebhook = async ({ eventName, payload, prompt, octokit }) => {
     return;
   }
 
-  await handleEvent({
-    input: prompt,
-    installationId,
-    eventName,
-    action: payload?.action,
-    repo,
-    octokit,
-  });
+  await handleEvent({ input: prompt, installationId, eventName, action: payload?.action, repo, octokit });
 };
 
-// 3. Webhook Handlers (organized by event type)
+// 3. Webhook Handlers
 app.webhooks.on("issues", async ({ payload, octokit }) => {
   const action = payload.action;
   const repo = payload.repository.full_name;
@@ -321,6 +337,7 @@ app.webhooks.on("issue_comment", async ({ payload, octokit }) => {
   await processWebhook({ eventName: "issue_comment", payload, prompt, octokit });
 });
 
+// --- UPDATED PULL REQUEST WEBHOOK ---
 app.webhooks.on("pull_request", async ({ payload, octokit }) => {
   const action = payload.action;
   const repo = payload.repository.full_name;
@@ -329,13 +346,21 @@ app.webhooks.on("pull_request", async ({ payload, octokit }) => {
   const body = toSafeText(pr?.body);
 
   let prompt = null;
-  if (action === "opened") {
-    // Prompt updated to encourage using the new tools
-    prompt = `Pull request opened in ${repo}. PR #${pr.number}: "${title}". Body: "${body}". Use get_pr_diff to summarize the changes and check get_workflow_runs. Post a welcome review comment.`;
-  } else if (action === "reopened" || action === "synchronize" || action === "ready_for_review") {
-    prompt = `Pull request updated in ${repo}. PR #${pr.number}: "${title}". Use get_workflow_runs to verify tests are passing and add a short comment acknowledging the update.`;
+  if (action === "opened" || action === "synchronize" || action === "ready_for_review") {
+    prompt = `
+      Pull request ${action} in ${repo}. PR #${pr.number}: "${title}". Body: "${body}".
+      
+      You are a Senior AI Code Reviewer. Perform a thorough review following this exact SOP:
+      1. Use 'list_pr_files' to see what files were modified.
+      2. Use 'get_pr_diff' to review the actual code changes.
+      3. IMPACT ANALYSIS: If a core function or component was changed, use 'search_repo_code' to find other files in the codebase that import or rely on the changed code. If found, use 'get_file_content' to verify the PR doesn't break them.
+      4. Use 'get_workflow_runs' to ensure CI/CD tests are passing.
+      5. Formulate your final decision:
+         - If the code looks great and tests pass: Use 'create_pull_request_review' with event "APPROVE" and a friendly summary.
+         - If there are bugs, breaking changes, or failing tests: Use 'create_pull_request_review' with event "REQUEST_CHANGES" and detail exactly what needs fixing.
+    `;
   } else if (action === "closed" && pr?.merged) {
-    prompt = `Pull request merged in ${repo}. PR #${pr.number}: "${title}". Post a brief merge acknowledgement comment.`;
+    prompt = `Pull request merged in ${repo}. PR #${pr.number}: "${title}". Use 'react_to_issue' to add a rocket or hooray emoji.`;
   }
 
   await processWebhook({ eventName: "pull_request", payload, prompt, octokit });
@@ -343,7 +368,6 @@ app.webhooks.on("pull_request", async ({ payload, octokit }) => {
 
 app.webhooks.on("pull_request_review", async ({ payload, octokit }) => {
   if (payload.action !== "submitted") return;
-
   const repo = payload.repository.full_name;
   const pr = payload.pull_request;
   const reviewState = payload.review?.state || "commented";
@@ -356,7 +380,7 @@ app.webhooks.on("push", async ({ payload, octokit }) => {
   const repo = payload.repository.full_name;
   const ref = payload.ref;
   const commits = payload.commits?.length || 0;
-  const prompt = `Push event in ${repo} on ${ref} with ${commits} commit(s). Review repository context and create a concise status note as an issue comment only if there is an open issue explicitly requesting update tracking.`;
+  const prompt = `Push event in ${repo} on ${ref} with ${commits} commit(s). Create a concise status note as an issue comment only if there is an open issue explicitly requesting update tracking.`;
   await processWebhook({ eventName: "push", payload, prompt, octokit });
 });
 
@@ -371,9 +395,8 @@ app.webhooks.onError((error) => {
 });
 
 // --- Telegram Webhook Endpoint ---
-// Receives APPROVE <id> or REJECT <id> from the Telegram bot
 server.post("/telegram", express.json(), async (req, res) => {
-  res.sendStatus(200); // Respond immediately so Telegram doesn't retry
+  res.sendStatus(200); 
 
   const text = (req.body?.message?.text || "").trim();
   const parts = text.split(" ");
