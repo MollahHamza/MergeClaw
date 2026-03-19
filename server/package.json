@@ -23,6 +23,7 @@
     "express": "^5.2.1",
     "fs": "^0.0.1-security",
     "langchain": "^1.2.32",
+    "node-cache": "^5.1.2",
     "octokit": "^5.0.5"
   }
 }

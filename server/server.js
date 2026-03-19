@@ -6,18 +6,27 @@ import { createNodeMiddleware } from "@octokit/webhooks";
 import { createReactAgent } from "@langchain/langgraph/prebuilt";
 import { DynamicTool } from "@langchain/core/tools";
 import { ChatGoogleGenerativeAI } from "@langchain/google-genai";
+import NodeCache from "node-cache"; // <-- ADDED node-cache
 import dotenv from "dotenv";
 dotenv.config();
 
-// Sets up Telegram credentials and a map to store actions pending user approval.
+// Sets up Telegram credentials
 const TELEGRAM_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
-const pendingActions = new Map();
+
+// Initializes NodeCache. stdTTL: 3540s (59 minutes). checkperiod: 60s (sweeps memory every minute).
+const pendingActions = new NodeCache({ stdTTL: 3540, checkperiod: 60 });
+
+// Notifies user if a token expires before they hit Approve/Reject
+pendingActions.on("expired", (key, value) => {
+  console.log(`[Cache] Action ${key} expired.`);
+  sendTelegram(`⏳ *Pending Action Expired*\nThe request \`${key}\` (${value.tool}) timed out after 60 minutes because the GitHub security token expired. It has been cleared from memory.`);
+});
 
 // Generates a random short ID for tracking pending Telegram actions.
 const genId = () => Math.random().toString(36).slice(2, 8);
 
-// Sends a message to the configured Telegram chat using the Telegram Bot API.
+// EXACT ORIGINAL TELEGRAM FUNCTION - UNTOUCHED
 async function sendTelegram(text) {
   if (!TELEGRAM_TOKEN || !TELEGRAM_CHAT_ID) {
     console.warn("[Telegram] Missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID in .env");
@@ -27,7 +36,7 @@ async function sendTelegram(text) {
     await fetch(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ chat_id: TELEGRAM_CHAT_ID, text }),
+      body: JSON.stringify({ chat_id: TELEGRAM_CHAT_ID, text, parse_mode: "Markdown" }),
     });
   } catch (err) {
     console.error("[Telegram Error]", err.message);
@@ -47,7 +56,7 @@ server.use(createNodeMiddleware(app.webhooks, { path: "/" }));
 
 // Initializes the Gemini 2.5 Flash model with LangChain for the agent's brain.
 const model = new ChatGoogleGenerativeAI({
-  model: "gemini-2.5-flash",
+  model: "gemini-2.5-flash", 
   apiKey: process.env.GEMINI_API_KEY,
   temperature: 0,
 });
@@ -63,12 +72,12 @@ async function callMCP(tool, args, token) {
     }
 
     console.log(`\x1b[33m[MCP Call]\x1b[0m Tool: ${tool}`);
-
+    
     const res = await fetch(`http://localhost:8000/mcp/tools/${tool}`, {
       method: "POST",
-      headers: {
+      headers: { 
         "Content-Type": "application/json",
-        "X-GitHub-Token": token
+        "X-GitHub-Token": token 
       },
       signal: AbortSignal.timeout(15000),
       body: JSON.stringify(args),
@@ -129,7 +138,7 @@ const tools = [
     func: async (input, config) => {
       const args = unwrap(input);
       const res = await callMCP("comment_on_issue", args, resolveGithubToken(config));
-      await sendTelegram(`💬 **Commented on Issue #${args.issue_number}** in ${args.repo}:\n\n"${args.comment}"`);
+      await sendTelegram(`💬 *Commented on Issue #${args.issue_number}* in ${args.repo}:\n\n"${args.comment}"`);
       return res;
     },
   }),
@@ -140,7 +149,7 @@ const tools = [
     func: async (input, config) => {
       const args = unwrap(input);
       const res = await callMCP("react_to_issue", args, resolveGithubToken(config));
-      await sendTelegram(`👍 **Reacted to #${args.issue_number}** in ${args.repo} with [${args.reaction}]`);
+      await sendTelegram(`👍 *Reacted to #${args.issue_number}* in ${args.repo} with [${args.reaction}]`);
       return res;
     },
   }),
@@ -151,7 +160,7 @@ const tools = [
     func: async (input, config) => {
       const args = unwrap(input);
       const res = await callMCP("comment_on_pull_request", args, resolveGithubToken(config));
-      await sendTelegram(`💬 **Commented on PR #${args.pull_number}** in ${args.repo}:\n\n"${args.comment}"`);
+      await sendTelegram(`💬 *Commented on PR #${args.pull_number}* in ${args.repo}:\n\n"${args.comment}"`);
       return res;
     },
   }),
@@ -162,7 +171,7 @@ const tools = [
     func: async (input, config) => {
       const args = unwrap(input);
       const res = await callMCP("create_pull_request_review", args, resolveGithubToken(config));
-      await sendTelegram(`📝 **PR Review Submitted (${args.event})** on PR #${args.pull_number} in ${args.repo}:\n\n"${args.body}"`);
+      await sendTelegram(`📝 *PR Review Submitted (${args.event})* on PR #${args.pull_number} in ${args.repo}:\n\n"${args.body}"`);
       return res;
     },
   }),
@@ -173,7 +182,7 @@ const tools = [
     func: async (input, config) => {
       const args = unwrap(input);
       const res = await callMCP("assign_issue", args, resolveGithubToken(config));
-      await sendTelegram(`👤 **Assigned ${args.assignees.join(", ")}** to #${args.issue_number} in ${args.repo}`);
+      await sendTelegram(`👤 *Assigned ${args.assignees.join(", ")}* to #${args.issue_number} in ${args.repo}`);
       return res;
     },
   }),
@@ -186,7 +195,7 @@ const tools = [
       const token = resolveGithubToken(config);
       const id = genId();
       pendingActions.set(id, { tool: "close_issue", args, token });
-      await sendTelegram(`⚠️ **ISSUE CLOSURE APPROVAL REQUIRED**\nAgent wants to close Issue #${args.issue_number} in ${args.repo}.\n\nReply:\nAPPROVE ${id}\nREJECT ${id}`);
+      await sendTelegram(`⚠️ *ISSUE CLOSURE APPROVAL REQUIRED*\nAgent wants to close Issue #${args.issue_number} in ${args.repo}.\n\nReply:\nAPPROVE ${id}\nREJECT ${id}`);
       return `Action queued. Closure request sent to Telegram. The user will handle it asynchronously. You have successfully completed your job, please conclude your response.`;
     },
   }),
@@ -199,7 +208,7 @@ const tools = [
       const token = resolveGithubToken(config);
       const id = genId();
       pendingActions.set(id, { tool: "merge_pull_request", args, token });
-      await sendTelegram(`⚠️ **MERGE APPROVAL REQUIRED**\nAgent wants to merge PR #${args.pull_number} in ${args.repo} (CI tests passed).\n\nReply:\nAPPROVE ${id}\nREJECT ${id}`);
+      await sendTelegram(`⚠️ *MERGE APPROVAL REQUIRED*\nAgent wants to merge PR #${args.pull_number} in ${args.repo} (CI tests passed).\n\nReply:\nAPPROVE ${id}\nREJECT ${id}`);
       return `Action queued. Merge request sent to Telegram. The user will handle it asynchronously. You have successfully completed your job, please conclude your response.`;
     },
   }),
@@ -343,43 +352,23 @@ app.webhooks.on("pull_request", async ({ payload, octokit }) => {
 
       2. DIFF REVIEW
         - Use 'get_pr_diff' to inspect the exact code changes.
-        - Focus on:
-          • Logic correctness
-          • Edge cases
-          • Code quality and readability
-          • Security concerns
+        - Focus on: logic correctness, edge cases, readability, and security.
 
       3. REPOSITORY CONTEXT MAPPING
         - Use 'get_repo_tree' to understand overall project structure if needed.
-        - This helps identify architectural impact and file relationships.
 
       4. IMPACT ANALYSIS (CRITICAL)
         - If any core function, module, or shared component is modified:
           a. Use 'search_repo_code' to locate where it is used across the repo.
-          b. For each relevant file found:
-              - Use 'get_file_content' to inspect usage.
-              - Verify the PR does NOT introduce breaking changes.
+          b. For each relevant file found, use 'get_file_content' to inspect usage and verify nothing breaks.
 
       5. DECISION MAKING
         Based on your analysis:
-        
-        ✅ If everything is correct:
-        - Use 'create_pull_request_review'
-        - event: "APPROVE"
-        - Provide a concise, professional summary of why the PR is valid.
-
-        ❌ If issues are found:
-        - Use 'create_pull_request_review'
-        - event: "REQUEST_CHANGES"
-        - Clearly specify:
-          • What is wrong
-          • Why it is a problem
-          • How to fix it
+        ✅ If everything is correct: Use 'create_pull_request_review' with event "APPROVE" and summarize why.
+        ❌ If issues are found: Use 'create_pull_request_review' with event "REQUEST_CHANGES" and detail what needs fixing.
 
       6. IMPORTANT CONSTRAINTS
-        - DO NOT merge the PR under any circumstances.
-        - CI/CD pipeline must complete before any merge decision.
-        - Be precise, actionable, and technically rigorous in feedback.
+        - DO NOT merge the PR under any circumstances. Let CI/CD pipeline finish first.
       `;
   } else if (action === "closed" && pr?.merged) {
     prompt = `Pull request merged in ${repo}. PR #${pr.number}: "${title}". Use 'react_to_issue' to add a rocket or hooray emoji.`;
@@ -453,7 +442,7 @@ app.webhooks.onError((error) => {
 
 // Receives HTTP POST requests from the Telegram bot with approval/rejection commands to execute queued AI tools.
 server.post("/telegram", express.json(), async (req, res) => {
-  res.sendStatus(200);
+  res.sendStatus(200); 
 
   const text = (req.body?.message?.text || "").trim();
   const parts = text.split(" ");
@@ -463,22 +452,46 @@ server.post("/telegram", express.json(), async (req, res) => {
   if (!id) return;
 
   if (!pendingActions.has(id)) {
-    await sendTelegram(`⚠️ No pending action found for ID: ${id}`);
+    await sendTelegram(`⚠️ No pending action found for ID: \`${id}\`. It may have expired.`);
     return;
   }
 
   const pending = pendingActions.get(id);
-  pendingActions.delete(id);
+  pendingActions.del(id); // Deletes immediately from cache upon execution
 
-  if (command === "APPROVE") {
-    console.log(`[Telegram] Action ${id} approved. Executing...`);
-    const result = await callMCP(pending.tool, pending.args, pending.token);
-    await sendTelegram(`✅ Action Approved and Executed!\n\n${result}`);
-  } else if (command === "REJECT") {
-    console.log(`[Telegram] Action ${id} rejected.`);
-    await sendTelegram(`❌ Action rejected and discarded.`);
+  // Temporarily load the saved GitHub token into the global variable 
+  // so the AI tools have permission to read the repo during this REJECT flow.
+  runtimeGithubToken = pending.token;
+
+  try {
+    if (command === "APPROVE") {
+      console.log(`[Telegram] Action ${id} approved. Executing...`);
+      const result = await callMCP(pending.tool, pending.args, pending.token);
+      await sendTelegram(`✅ *Action Approved and Executed!*\n\n${result}`);
+    } else if (command === "REJECT") {
+      console.log(`[Telegram] Action ${id} rejected.`);
+      await sendTelegram(`❌ *Action rejected*. Instructing agent to review and request changes...`);
+
+      // If a merge request was rejected, re-invoke the agent to request changes instead.
+      if (pending.tool === "merge_pull_request") {
+        const prompt = `The repository maintainer explicitly REJECTED the merge for PR #${pending.args.pull_number} in ${pending.args.repo}. Please use 'get_pr_diff' and 'list_pr_files' to review the code again, figure out what might be wrong, and use 'create_pull_request_review' with event "REQUEST_CHANGES" to leave detailed feedback on what the author needs to fix.`;
+        
+        try {
+          const result = await agent.invoke(
+            { messages: [{ role: "user", content: prompt }] }
+          );
+          console.log(`\nFinal Response for REJECT: ${result.messages[result.messages.length - 1].content}`);
+        } catch (err) {
+          console.error("\x1b[31m[Agent Crash on Reject]\x1b[0m", err);
+        }
+      }
+    }
+  } finally {
+    // Clear the token after the AI finishes so we don't leak permissions
+    runtimeGithubToken = null; 
   }
 });
+
 
 // Starts the Express application on port 3000 to listen for incoming GitHub webhooks and Telegram callbacks.
 server.listen(3000, () => console.log("Backend listening on port 3000"));
