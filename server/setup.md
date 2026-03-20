@@ -72,6 +72,5 @@ In GitHub App settings, set:
 
 ## Security
 
-- Do not commit `.env` files.
-- Do not commit private key files.
+- Do not commit `.env` or private files.
 - Rotate webhook secret and private key if exposed.
