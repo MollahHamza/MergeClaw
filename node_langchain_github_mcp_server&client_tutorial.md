@@ -313,7 +313,7 @@ GitHub API
 * Diff chunking
 * File-level review comments
 * Static analysis
-* Repo embeddings
+* Context providing
 * CI/CD integration
 
 ---
