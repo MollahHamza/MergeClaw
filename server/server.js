@@ -364,6 +364,7 @@ app.webhooks.on("pull_request", async ({ payload, octokit }) => {
 
       5. DECISION MAKING
         Based on your analysis:
+        You should always check the file where the code has been changed, and its dependent files.
         ✅ If everything is correct: Use 'create_pull_request_review' with event "APPROVE" and summarize why.
         ❌ If issues are found: Use 'create_pull_request_review' with event "REQUEST_CHANGES" and detail what needs fixing.
 
